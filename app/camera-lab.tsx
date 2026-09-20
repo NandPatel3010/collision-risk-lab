@@ -176,23 +176,27 @@ export default function CameraLab() {
   };
 
   const risk = estimate.seconds !== null && estimate.seconds < 3;
-  return <div className="camera-workspace">
-    <section className="stage-column" aria-label="Webcam approach detection">
-      <div className="section-heading"><div><p className="eyebrow">Webcam mode</p><h1>Approach detection</h1><p className="description">Track an object moving toward your laptop camera.</p></div><span className={"status-pill " + (risk ? "warning" : status === "live" ? "clear" : "") }><span className="status-dot" />{risk ? "Approaching" : status === "live" ? "Camera live" : status === "loading" ? "Starting" : "Camera off"}</span></div>
-      <div className="camera-frame" style={{ aspectRatio: `${videoSize.width} / ${videoSize.height}` }}>
-        <video ref={videoRef} playsInline muted aria-label="Live webcam preview" />
-        {status === "live" && objects.map((object, index) => <button key={`${object.label}-${index}`} type="button" className={"camera-box " + (targetIndex === index ? "selected" : "")} style={{ left: `${object.box.x / videoSize.width * 100}%`, top: `${object.box.y / videoSize.height * 100}%`, width: `${object.box.width / videoSize.width * 100}%`, height: `${object.box.height / videoSize.height * 100}%` }} onClick={() => selectObject(object, index)} aria-label={`Track ${object.label}, ${Math.round(object.score * 100)} percent confidence`}><span>{object.label} · {Math.round(object.score * 100)}%</span></button>)}
-        {status !== "live" && <div className="camera-placeholder"><div className="camera-symbol" aria-hidden="true">◉</div><strong>{status === "loading" ? "Preparing camera…" : "Webcam is off"}</strong><span>{status === "loading" ? "The detector loads on your device." : "Start it when you’re ready to test."}</span></div>}
-        {status === "live" && <div className="frame-label">LIVE CAMERA <span>·</span> {objects.length} object{objects.length === 1 ? "" : "s"} detected</div>}
-      </div>
-      <div className="camera-actions"><button type="button" className="play-button" onClick={status === "live" || status === "loading" ? stopCamera : startCamera}>{status === "live" || status === "loading" ? "Stop camera" : "Start camera"}</button><span>{hint}</span></div>
-      {error && <p className="error-message" role="alert">{error}</p>}
-      <div className="camera-note"><strong>How to test</strong><p>Keep your laptop still. Hold a recognizable object fully in view, select its outline, then slowly move it toward the camera. A person walking toward the camera also works.</p></div>
-    </section>
-    <aside className="control-column">
-      <section className="panel camera-result"><p className="eyebrow">Live estimate</p><span className="camera-ttc">{estimate.seconds === null ? "—" : estimate.seconds.toFixed(1)}<small>{estimate.seconds === null ? "" : " s"}</small></span><strong>Time to contact</strong><p>{estimate.seconds === null ? "Waiting for a steady, measurable approach." : "Estimated time until the selected object reaches the camera plane if its motion stays constant."}</p></section>
-      <section className="panel metrics-panel"><p className="eyebrow">Tracking details</p><div className="metric"><span>Selected object</span><strong>{targetName}</strong></div><div className="metric"><span>Motion</span><strong className="capitalized">{estimate.trend}</strong></div><div className="metric"><span>Fit quality</span><strong>{estimate.quality ? `${Math.round(estimate.quality * 100)}%` : "—"}</strong></div></section>
-      <p className="footnote">Video stays in your browser and is not uploaded or saved. A single webcam cannot measure true distance in metres. This is a demonstration, not a safety device.</p>
-    </aside>
-  </div>;
+  const cameraOn = status === "live" || status === "loading";
+  return <main className="camera-app">
+    <header className="app-header"><div><strong>Collision Risk Lab</strong><span>Camera approach test</span></div><span className={"camera-status " + (status === "live" ? "online" : "")}>{status === "live" ? "Camera on" : status === "loading" ? "Starting camera" : "Camera off"}</span></header>
+    <div className="app-content">
+      <section className="camera-area" aria-label="Webcam approach detection">
+        <div className="section-top"><div><h1>Live camera</h1><p>Select a detected object, then move it toward a stationary camera.</p></div><button type="button" className={cameraOn ? "control-button secondary" : "control-button primary"} onClick={cameraOn ? stopCamera : startCamera}>{cameraOn ? "Stop camera" : "Start camera"}</button></div>
+        <div className="camera-frame" style={{ aspectRatio: `${videoSize.width} / ${videoSize.height}` }}>
+          <video ref={videoRef} playsInline muted aria-label="Live webcam preview" aria-hidden={status !== "live"} />
+          {status === "live" && objects.map((object, index) => <button key={`${object.label}-${index}`} type="button" className={"camera-box " + (targetIndex === index ? "selected" : "")} style={{ left: `${object.box.x / videoSize.width * 100}%`, top: `${object.box.y / videoSize.height * 100}%`, width: `${object.box.width / videoSize.width * 100}%`, height: `${object.box.height / videoSize.height * 100}%` }} onClick={() => selectObject(object, index)} aria-label={`Track ${object.label}, ${Math.round(object.score * 100)} percent confidence`}><span>{object.label} · {Math.round(object.score * 100)}%</span></button>)}
+          {status !== "live" && <div className="camera-placeholder"><strong>{status === "loading" ? "Preparing camera…" : "Camera is off"}</strong><span>{status === "loading" ? "Loading object detection on this device." : "Press Start camera to begin."}</span></div>}
+          {status === "live" && <div className="video-count">{objects.length} object{objects.length === 1 ? "" : "s"} detected</div>}
+        </div>
+        <p className="camera-hint" role="status">{hint}</p>
+        {error && <p className="error-message" role="alert">{error}</p>}
+        <p className="test-instructions"><strong>Test setup:</strong> Keep the laptop still, select an outlined person or object, and move it slowly toward the camera while keeping it fully in view.</p>
+      </section>
+      <aside className="readings" aria-label="Approach estimate">
+        <div className="main-reading"><div className="reading-label">Estimated time to contact</div><div className={"reading-value " + (risk ? "risk" : "")} aria-live="polite">{estimate.seconds === null ? "—" : estimate.seconds.toFixed(1)}{estimate.seconds !== null && <span> s</span>}</div><p>{estimate.seconds === null ? "No reliable estimate yet" : "At the current rate of approach"}</p></div>
+        <dl className="tracking-details"><div><dt>Selected object</dt><dd>{targetName}</dd></div><div><dt>Motion</dt><dd className="capitalized">{estimate.trend}</dd></div><div><dt>Trend consistency</dt><dd>{estimate.quality ? `${Math.round(estimate.quality * 100)}%` : "—"}</dd></div></dl>
+        <p className="privacy-note">Video is processed in your browser; it is not uploaded or saved. This estimates time to the camera plane, not distance in metres, and is not a safety device.</p>
+      </aside>
+    </div>
+  </main>;
 }

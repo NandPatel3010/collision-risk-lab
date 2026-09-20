@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Collision Risk Lab",
-  description: "Explore 2D collision scenarios and estimate object approach using your laptop camera.",
+  description: "Estimate an approaching object's time to contact with your laptop camera.",
   icons: {
     icon: "/favicon.svg",
     shortcut: "/favicon.svg",
