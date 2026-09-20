@@ -3,6 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { isCollision, positionsAt, predict, SCENARIOS, type ScenarioId } from "@/lib/simulation";
 import BenchmarkPanel from "./benchmark-panel";
+import CameraLab from "./camera-lab";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
 export default function Home() {
   const [scenarioId, setScenarioId] = useState<ScenarioId>("crossing");
@@ -52,7 +54,9 @@ export default function Home() {
   };
 
   return <main className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark">◈</span><span>Collision Risk Lab</span></div><span className="topbar-note">2D prediction workspace</span></header>
+    <header className="topbar"><div className="brand"><span className="brand-mark">◈</span><span>Collision Risk Lab</span></div><span className="topbar-note">Simulation + live camera</span></header>
+    <Tabs defaultValue="simulation" className="mode-tabs"><TabsList className="mode-list" aria-label="Workspace mode"><TabsTrigger value="simulation">Simulation</TabsTrigger><TabsTrigger value="webcam">Webcam</TabsTrigger></TabsList>
+    <TabsContent value="simulation">
     <div className="workspace">
       <section className="stage-column" aria-label="Collision simulation">
         <div className="section-heading"><div><p className="eyebrow">Live scenario</p><h1>{scenario.name}</h1><p className="description">{scenario.detail}</p></div><span className={"status-pill " + (collision ? "collision" : prediction.risk ? "warning" : "clear")}><span className="status-dot" />{collision ? "Collision" : prediction.risk ? "Risk detected" : "Clear"}</span></div>
@@ -78,5 +82,8 @@ export default function Home() {
         <p className="footnote">Predictions assume each vehicle keeps its current speed and direction. This is a simulation, not a road-safety system.</p>
       </aside>
     </div>
+    </TabsContent>
+    <TabsContent value="webcam"><CameraLab /></TabsContent>
+    </Tabs>
   </main>;
 }
