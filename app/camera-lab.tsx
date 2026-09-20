@@ -292,7 +292,7 @@ export default function CameraLab() {
       video.srcObject = stream;
       await video.play();
       setVideoSize({ width: video.videoWidth || 960, height: video.videoHeight || 540 });
-      const detector = await YOLO.load("/models/yolo26n-seg.onnx", { ortBaseUrl: new URL("/ort/", window.location.origin) });
+      const detector = await YOLO.load("/models/yolo26n-seg.onnx");
       if (session !== sessionRef.current) { detector.free(); return; }
       detectorRef.current = detector;
       setStatus("live");
