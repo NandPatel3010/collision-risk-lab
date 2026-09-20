@@ -47,6 +47,9 @@ h1 { margin: 0; font-size: clamp(24px, 2.4vw, 32px); font-weight: 650; letter-sp
 .reading-value span { font-size: 25px; letter-spacing: -.02em; }
 .reading-value.risk { color: #aa611a; }
 .main-reading p { margin: 6px 0 0; color: #6b7b85; font-size: 13px; }
+.secondary-reading { padding: 17px 22px 18px; border-bottom: 1px solid #e0e6ea; }
+.secondary-value { margin-top: 3px; color: #20313f; font-size: 28px; font-weight: 650; letter-spacing: -.04em; }
+.secondary-reading p { margin: 3px 0 0; color: #6b7b85; font-size: 13px; }
 .tracking-details { margin: 0; padding: 6px 22px; }
 .tracking-details > div { display: flex; justify-content: space-between; gap: 14px; padding: 12px 0; border-bottom: 1px solid #ebeff1; font-size: 14px; }
 .tracking-details > div:last-child { border-bottom: 0; }
@@ -59,5 +62,5 @@ h1 { margin: 0; font-size: clamp(24px, 2.4vw, 32px); font-weight: 650; letter-sp
 .run-controls .control-button:disabled { opacity: .55; cursor: not-allowed; }
 .run-controls p { margin: 10px 0 0; color: #61727e; font-size: 12px; line-height: 1.5; }
 .calibration-line { margin-top: 16px; padding-top: 12px; border-top: 1px solid #ebeff1; font-size: 13px; font-weight: 650; color: #20313f; }
-@media (max-width: 920px) { .app-content { grid-template-columns: 1fr; }.readings { display: grid; grid-template-columns: minmax(230px, 1fr) minmax(230px, 1fr); }.main-reading { border-bottom: 0; border-right: 1px solid #e0e6ea; }.privacy-note { grid-column: 1 / -1; } }
-@media (max-width: 620px) { .app-header { align-items: flex-start; }.app-header > div { display: block; }.app-header > div span { display: block; }.app-content { padding-top: 22px; }.section-top { display: block; min-height: 0; margin-bottom: 18px; }.control-button { margin-top: 15px; }.readings { display: block; }.main-reading { border-right: 0; border-bottom: 1px solid #e0e6ea; }.camera-frame { border-radius: 5px; }.camera-feedback { display: block; }.camera-legend { margin-top: 8px; } }
+@media (max-width: 920px) { .app-content { grid-template-columns: 1fr; } }
+@media (max-width: 620px) { .app-header { align-items: flex-start; }.app-header > div { display: block; }.app-header > div span { display: block; }.app-content { padding-top: 22px; }.section-top { display: block; min-height: 0; margin-bottom: 18px; }.control-button { margin-top: 15px; }.camera-frame { border-radius: 5px; }.camera-feedback { display: block; }.camera-legend { margin-top: 8px; } }

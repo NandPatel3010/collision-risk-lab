@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type MouseEvent } from "react";
 import { YOLO, type Results } from "@ultralytics/yolo";
 import { emptyEstimate, estimateApproach, type ApproachEstimate, type ScaleSample } from "@/lib/approach";
+import { predictObjectContact, updateObjectTracks, type ObjectTrack, type PairPrediction } from "@/lib/trajectory";
 
 type Box = { x: number; y: number; width: number; height: number };
 type SeenObject = { box: Box; label: string; score: number };
@@ -60,6 +61,8 @@ export default function CameraLab() {
   const lastInferenceRef = useRef(0);
   const targetRef = useRef<SeenObject | null>(null);
   const objectsRef = useRef<SeenObject[]>([]);
+  const tracksRef = useRef<ObjectTrack[]>([]);
+  const nextTrackIdRef = useRef(1);
   const candidateRef = useRef<{ object: SeenObject; count: number } | null>(null);
   const missedRef = useRef(0);
   const autoSelectAfterRef = useRef(0);
@@ -78,6 +81,7 @@ export default function CameraLab() {
   const [targetIndex, setTargetIndex] = useState<number | null>(null);
   const [targetName, setTargetName] = useState("No object tracked");
   const [estimate, setEstimate] = useState<ApproachEstimate>(emptyEstimate);
+  const [pairEstimate, setPairEstimate] = useState<PairPrediction | null>(null);
   const [hint, setHint] = useState("Start the camera. An object will be tracked automatically when it is clearly detected.");
   const [videoSize, setVideoSize] = useState({ width: 1280, height: 720 });
   const [calibration, setCalibration] = useState({ factor: 1, verifiedRuns: 0 });
@@ -132,6 +136,8 @@ export default function CameraLab() {
     contourRef.current?.getContext("2d")?.clearRect(0, 0, contourRef.current.width, contourRef.current.height);
     targetRef.current = null;
     objectsRef.current = [];
+    tracksRef.current = [];
+    nextTrackIdRef.current = 1;
     candidateRef.current = null;
     samplesRef.current = [];
     smoothScaleRef.current = null;
@@ -147,6 +153,7 @@ export default function CameraLab() {
     setTargetIndex(null);
     setTargetName("No object tracked");
     setEstimate(emptyEstimate);
+    setPairEstimate(null);
     setHint("Start the camera to track an object.");
   };
 
@@ -193,6 +200,10 @@ export default function CameraLab() {
       objectsRef.current = visible;
       setObjects(visible);
       setVideoSize((size) => size.width === width && size.height === height ? size : { width, height });
+      const tracked = updateObjectTracks(tracksRef.current, visible, performance.now() / 1000, width, height, nextTrackIdRef.current);
+      tracksRef.current = tracked.tracks;
+      nextTrackIdRef.current = tracked.nextId;
+      setPairEstimate(predictObjectContact(tracked.tracks, width, height));
 
       const previous = targetRef.current;
       let selected = null as number | null;
@@ -344,13 +355,13 @@ export default function CameraLab() {
   };
 
   const adjustedSeconds = estimate.seconds === null ? null : estimate.seconds * calibration.factor;
-  const risk = adjustedSeconds !== null && adjustedSeconds < 3;
+  const risk = pairEstimate !== null && pairEstimate.seconds < 3;
   const cameraOn = status === "live" || status === "loading";
   return <main className="camera-app">
-    <header className="app-header"><div><strong>Collision Risk Lab</strong><span>Live approach measurement</span></div><span className={"camera-status " + (status === "live" ? "online" : "")}>{status === "live" ? "Camera on" : status === "loading" ? "Starting camera" : "Camera off"}</span></header>
+    <header className="app-header"><div><strong>Collision Risk Lab</strong><span>Live camera-view motion estimates</span></div><span className={"camera-status " + (status === "live" ? "online" : "")}>{status === "live" ? "Camera on" : status === "loading" ? "Starting camera" : "Camera off"}</span></header>
     <div className="app-content">
       <section className="camera-area" aria-label="Webcam approach detection">
-        <div className="section-top"><div><h1>Camera</h1><p>Keep the laptop still. Move an outlined object toward the lens.</p></div><button type="button" className={cameraOn ? "control-button secondary" : "control-button primary"} onClick={cameraOn ? stopCamera : startCamera}>{cameraOn ? "Stop camera" : "Start camera"}</button></div>
+        <div className="section-top"><div><h1>Camera</h1><p>Keep the laptop still. Move one visible object toward another, or toward the lens.</p></div><button type="button" className={cameraOn ? "control-button secondary" : "control-button primary"} onClick={cameraOn ? stopCamera : startCamera}>{cameraOn ? "Stop camera" : "Start camera"}</button></div>
         <div className="camera-frame" style={{ aspectRatio: `${videoSize.width} / ${videoSize.height}` }} onClick={chooseAtPoint}>
           <video ref={videoRef} playsInline muted aria-label="Live webcam preview" aria-hidden={status !== "live"} />
           <canvas ref={contourRef} className="outline-layer" aria-hidden="true" />
@@ -360,13 +371,14 @@ export default function CameraLab() {
         <div className="camera-feedback"><p className="camera-hint" role="status">{hint}</p>{status === "live" && <span className="camera-legend"><i /> Tracking <i /> Other detected objects</span>}</div>
         {error && <p className="error-message" role="alert">{error}</p>}
         {status === "live" && objects.length > 1 && <div className="object-choices" aria-label="Detected objects">{objects.map((object, index) => <button key={`${object.label}-${index}`} type="button" className={targetIndex === index ? "object-choice active" : "object-choice"} onClick={() => selectObject(object, index)}>{object.label} <span>{Math.round(object.score * 100)}%</span></button>)}</div>}
-        <p className="test-instructions">Contours follow the model’s estimated object shape. They may miss edges or misidentify objects, especially in low light. Tap an outline or use the object buttons to change what is tracked.</p>
+        <p className="test-instructions">Contours follow the model’s estimated object shape. Keep both objects fully visible and separated at first. Tap an outline or use the object buttons to change the lens-approach target.</p>
       </section>
       <aside className="readings" aria-label="Approach estimate">
-        <div className="main-reading"><div className="reading-label">TIME UNTIL CONTACT</div><div className={"reading-value " + (risk ? "risk" : "")} aria-live="polite">{adjustedSeconds === null ? "—" : adjustedSeconds.toFixed(1)}{adjustedSeconds !== null && <span> s</span>}</div><p>{adjustedSeconds !== null ? "Estimated from apparent growth" : targetName === "No object tracked" ? "Waiting for a tracked object" : estimate.trend === "steady" ? "No clear approach toward camera" : estimate.trend === "receding" ? "Object moving away" : "Measuring movement"}</p></div>
+        <div className="main-reading"><div className="reading-label">OBJECT-TO-OBJECT · CAMERA VIEW</div><div className={"reading-value " + (risk ? "risk" : "")} aria-live="polite">{pairEstimate === null ? "—" : pairEstimate.seconds.toFixed(1)}{pairEstimate !== null && <span> s</span>}</div><p>{pairEstimate ? `${pairEstimate.moving} moving toward stationary ${pairEstimate.stationary}` : status !== "live" ? "Start the camera to measure a shared path" : objects.length < 2 ? "Keep two recognizable objects in view" : "Waiting for one object to stay still and another to move toward it"}</p></div>
+        <div className="secondary-reading"><div className="reading-label">TOWARD CAMERA · LENS APPROACH</div><div className="secondary-value">{adjustedSeconds === null ? "—" : `${adjustedSeconds.toFixed(1)} s`}</div><p>{adjustedSeconds !== null ? "Estimated from apparent growth" : targetName === "No object tracked" ? "Waiting for a tracked object" : estimate.trend === "steady" ? "No clear approach toward camera" : estimate.trend === "receding" ? "Object moving away" : "Measuring movement"}</p></div>
         <dl className="tracking-details"><div><dt>Tracking</dt><dd>{targetName}</dd></div><div><dt>Motion</dt><dd className="capitalized">{estimate.trend}</dd></div><div><dt>Apparent growth</dt><dd>{estimate.growthPercent ? `${estimate.growthPercent > 0 ? "+" : ""}${estimate.growthPercent.toFixed(1)}%` : "—"}</dd></div><div><dt>Signal quality</dt><dd>{estimate.quality ? `${Math.round(estimate.quality * 100)}%` : "—"}</dd></div></dl>
         <div className="run-controls"><button type="button" className="control-button primary" onClick={markReference} disabled={!runRef.current || savingReference}>{savingReference ? "Saving trial…" : "Mark reference reached"}</button><p>For calibration, stop the object at the same safe point each trial and mark it here.</p><div className="calibration-line">Calibration · {calibration.verifiedRuns} verified trial{calibration.verifiedRuns === 1 ? "" : "s"} · {calibration.factor.toFixed(2)}×</div><p role="status">{saveStatus}</p></div>
-        <p className="privacy-note">Only numeric measurements and the object label are saved. Video is processed on this device. Contact time assumes roughly steady motion toward the camera; it is not a safety device.</p>
+        <p className="privacy-note">Object-to-object time predicts overlap in the 2D image, not a confirmed physical collision; the objects may be at different depths. It assumes steady motion. Video is processed on this device. Only lens-approach numeric measurements and the selected label are saved for calibration. This is not a safety device.</p>
       </aside>
     </div>
   </main>;
