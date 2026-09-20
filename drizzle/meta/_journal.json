@@ -8,6 +8,13 @@
       "when": 1789876925801,
       "tag": "0000_past_nocturne",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1789889518611,
+      "tag": "0001_rich_thunderbolt",
+      "breakpoints": true
     }
   ]
 }
