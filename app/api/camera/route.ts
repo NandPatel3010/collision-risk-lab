@@ -41,7 +41,7 @@ export async function POST(request: Request) {
       if (run.status !== "active") return bad("This run has ended.");
       if (!Array.isArray(data.samples) || data.samples.length > 32) return bad("Invalid sample batch.");
       const samples = data.samples as IncomingSample[];
-      if (!samples.every((sample) => sample && cleanElapsed(sample.elapsedMs) && Number.isFinite(sample.scale) && sample.scale > 0 && sample.scale <= 1 && (sample.rawTtc === null || Number.isFinite(sample.rawTtc) && sample.rawTtc >= 0 && sample.rawTtc <= 20) && Number.isFinite(sample.quality) && sample.quality >= 0 && sample.quality <= 1)) return bad("Invalid measurement.");
+      if (!samples.every((sample) => sample && cleanElapsed(sample.elapsedMs) && Number.isFinite(sample.scale) && sample.scale > 0 && sample.scale <= 1 && (sample.rawTtc === null || Number.isFinite(sample.rawTtc) && sample.rawTtc >= 0 && sample.rawTtc <= 30) && Number.isFinite(sample.quality) && sample.quality >= 0 && sample.quality <= 1)) return bad("Invalid measurement.");
       if (samples.length) await db.insert(cameraSamples).values(samples.map((sample) => ({ ...sample, runId: id })));
       return Response.json({ saved: samples.length });
     }

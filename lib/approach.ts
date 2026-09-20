@@ -4,14 +4,15 @@ export type ApproachEstimate = {
   seconds: number | null;
   trend: "approaching" | "steady" | "receding" | "measuring";
   quality: number;
+  growthPercent: number;
 };
 
-/** Estimate time to the camera plane from changes in apparent object size. */
+export const emptyEstimate: ApproachEstimate = { seconds: null, trend: "measuring", quality: 0, growthPercent: 0 };
+
+/** Monocular time-to-contact: inverse apparent size is approximately linear in time. */
 export function estimateApproach(samples: ScaleSample[]): ApproachEstimate {
   const valid = samples.filter((sample) => Number.isFinite(sample.time) && Number.isFinite(sample.scale) && sample.scale > 0);
-  if (valid.length < 6 || valid.at(-1)!.time - valid[0].time < 0.65) {
-    return { seconds: null, trend: "measuring", quality: 0 };
-  }
+  if (valid.length < 4 || valid.at(-1)!.time - valid[0].time < 0.42) return emptyEstimate;
 
   // For an object of roughly fixed physical size, inverse image size is
   // approximately proportional to distance from a stationary camera.
@@ -21,22 +22,20 @@ export function estimateApproach(samples: ScaleSample[]): ApproachEstimate {
   const meanX = points.reduce((sum, point) => sum + point.x, 0) / n;
   const meanY = points.reduce((sum, point) => sum + point.y, 0) / n;
   const xx = points.reduce((sum, point) => sum + (point.x - meanX) ** 2, 0);
-  if (xx === 0) return { seconds: null, trend: "measuring", quality: 0 };
+  if (xx === 0) return emptyEstimate;
   const slope = points.reduce((sum, point) => sum + (point.x - meanX) * (point.y - meanY), 0) / xx;
   const intercept = meanY - slope * meanX;
   const residual = points.reduce((sum, point) => sum + (point.y - intercept - slope * point.x) ** 2, 0);
   const total = points.reduce((sum, point) => sum + (point.y - meanY) ** 2, 0);
   const quality = total > 0 ? Math.max(0, Math.min(1, 1 - residual / total)) : 0;
-  const initial = valid[0].scale;
-  const latest = valid.at(-1)!.scale;
-  const change = (latest - initial) / initial;
+  const growthPercent = (valid.at(-1)!.scale / valid[0].scale - 1) * 100;
 
-  if (change < -0.06 && slope > 0) return { seconds: null, trend: "receding", quality };
-  if (change < 0.06 || slope >= 0) return { seconds: null, trend: "steady", quality };
-  const currentInverseScale = intercept + slope * points.at(-1)!.x;
+  if (growthPercent < -3 && slope > 0) return { seconds: null, trend: "receding", quality, growthPercent };
+  if (growthPercent < 3 || slope >= 0) return { seconds: null, trend: "steady", quality, growthPercent };
+  const currentInverseScale = 1 / valid.at(-1)!.scale;
   const seconds = -currentInverseScale / slope;
-  if (quality < 0.55 || !Number.isFinite(seconds) || seconds < 0.2 || seconds > 15) {
-    return { seconds: null, trend: "measuring", quality };
+  if (quality < 0.4 || !Number.isFinite(seconds) || seconds < 0.25 || seconds > 30) {
+    return { seconds: null, trend: "measuring", quality, growthPercent };
   }
-  return { seconds, trend: "approaching", quality };
+  return { seconds, trend: "approaching", quality, growthPercent };
 }
