@@ -1,25 +1,33 @@
 # Collision Risk Lab
 
-A camera-only experiment for estimating the time until a visible object reaches a stationary laptop camera. It runs object detection in the browser; video is not uploaded or stored.
+A camera-only experiment for estimating the time until a visible object reaches a stationary laptop camera. Object detection runs in the browser; video is not uploaded or stored. The app saves numeric camera measurements and calibration results through a server-side API to Supabase Postgres.
 
-## Use it
+## Run locally
 
-1. Open the site and choose **Start camera**. Allow camera access in the browser.
-2. Select the outline around a detected person or object.
-3. Keep the laptop still and move the selected object slowly toward the camera, keeping it fully visible.
+1. Install dependencies with `pnpm install` (or `npm install`).
+2. Copy `.env.example` to `.env.local` and fill in `SUPABASE_URL` and `SUPABASE_SECRET_KEY` from your Supabase project.
+3. Run the SQL in `supabase/migrations/20260927000000_camera_measurements.sql` in the Supabase SQL Editor.
+4. Start the app with `pnpm dev` (or `npm run dev`).
 
-The app shows an estimated time to contact only when it sees a reasonably consistent approach. If the object is stationary, moves away, leaves the frame, or cannot be tracked reliably, it shows no countdown.
+## Deploy to Vercel
+
+1. Create a Supabase project and run the SQL migration above.
+2. Import the private GitHub repository into Vercel. Vercel detects the Next.js app and uses `pnpm build` or `npm run build`.
+3. In the Vercel project settings, add `SUPABASE_URL` and `SUPABASE_SECRET_KEY` for Production and Preview deployments, then redeploy.
+
+`SUPABASE_SECRET_KEY` is used only by the server API route. Never rename it with a `NEXT_PUBLIC_` prefix or commit its real value. The database tables have row-level security enabled and are not accessible to browser/anonymous roles; reads and writes pass through `/api/camera`.
 
 ## How it works
 
-The browser runs a local copy of MediaPipe Vision Tasks with EfficientDet-Lite0 to find objects. It tracks the selected detection between frames and records changes in the apparent size of its bounding box. For a fixed-size object approaching a stationary camera, inverse image size is approximately proportional to distance. A linear fit to that signal produces an approximate time to the camera plane.
+The browser runs object detection with a locally served model. It tracks the selected detection and records changes in the apparent size of its bounding box. A linear fit to inverse image size produces an approximate time to contact. The API stores object labels, numeric samples, and user-marked reference outcomes so verified trials can update the app's calibration factor. Video remains on the device.
 
-This is **not** a measured distance, a physical collision detector, or a safety device. Rotating objects, a moving camera, occlusion, poor lighting, or changes in the detector's outline can make the estimate wrong. “Trend consistency” describes how well the recent measurements fit the simple model; it is not a calibrated confidence or accuracy score.
+This is **not** a measured distance, a physical collision detector, or a safety device. Rotating objects, a moving camera, occlusion, poor lighting, or changes in the detector's outline can make the estimate wrong. “Trend consistency” describes how well recent measurements fit the simple model; it is not a calibrated confidence or accuracy score.
 
 ## Source
 
-- `app/camera-lab.tsx`: camera permission, detector loading, tracking, and interface.
+- `app/camera-lab.tsx`: camera permission, detector, tracking, and interface.
+- `app/api/camera/route.ts`: validated measurement API route.
 - `lib/approach.ts`: time-to-contact estimation from apparent size.
-- `public/vision`: locally served detection model and runtime. MediaPipe Vision Tasks 1.0.1 uses the [Apache 2.0 license](public/vision/LICENSE.txt); the model comes from [Google's object detection guide](https://developers.google.com/edge/mediapipe/solutions/vision/object_detector/web_js).
-
-Run locally with `npm install` and `npm run dev`. The old simulation and benchmark screens and endpoint have been removed. Previously saved benchmark records remain in the site's database and have not been deleted.
+- `lib/calibration.ts`: calibration from user-marked reference points.
+- `supabase/migrations/20260927000000_camera_measurements.sql`: database tables and access controls.
+- `public/models`: locally served object detection model.
