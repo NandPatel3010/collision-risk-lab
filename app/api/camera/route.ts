@@ -1,5 +1,5 @@
-import { databaseRequest } from "@/db";
-import { combinedCalibration, trialCalibration } from "@/lib/calibration";
+import { databaseFailure, databaseRequest } from "@/db";
+import { analyzeCalibration, combinedCalibration } from "@/lib/calibration";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,9 +9,10 @@ type IncomingSample = {
   scale: number;
   rawTtc: number | null;
   quality: number;
+  clientSampleId?: string;
 };
 
-type CameraRun = { id: string; status: string };
+type CameraRun = { id: string; status: string; reference_elapsed_ms: number | null; calibration_ratio: number | null };
 type CalibrationRow = { calibration_ratio: number | null };
 type SavedSample = { elapsed_ms: number; raw_ttc: number | null; quality: number };
 
@@ -39,11 +40,24 @@ async function calibration() {
   return { factor: combinedCalibration(ratios), verifiedRuns: ratios.length };
 }
 
+// Saving a run must not appear to fail merely because the following read fails.
+async function optionalCalibration() {
+  try { return { ...(await calibration()), calibrationAvailable: true }; }
+  catch { return { calibrationAvailable: false }; }
+}
+
+async function runAnalysis(id: string, referenceElapsedMs: number) {
+  const rows = await databaseRequest<SavedSample[]>("camera_samples", {
+    method: "GET", query: { select: "elapsed_ms,raw_ttc,quality", run_id: `eq.${id}`, order: "elapsed_ms.desc,id.desc", limit: "50" },
+  });
+  return analyzeCalibration(rows.map((row) => ({ elapsedMs: row.elapsed_ms, rawTtc: row.raw_ttc, quality: row.quality })), referenceElapsedMs);
+}
+
 export async function GET() {
   try {
     return Response.json(await calibration());
-  } catch {
-    return Response.json({ error: "Could not load saved calibration." }, { status: 500 });
+  } catch (error) {
+    return databaseFailure(error);
   }
 }
 
@@ -70,14 +84,14 @@ export async function POST(request: Request) {
         method: "POST",
         body: { id, object_label: label },
       });
-      return Response.json({ id, ...(await calibration()) }, { status: 201 });
+      return Response.json({ id, ...(await optionalCalibration()) }, { status: 201 });
     }
 
     if (!cleanId(data.id)) return bad("Invalid run ID.");
     const id = data.id;
     const [run] = await databaseRequest<CameraRun[]>("camera_runs", {
       method: "GET",
-      query: { select: "id,status", id: `eq.${id}`, limit: "1" },
+      query: { select: "id,status,reference_elapsed_ms,calibration_ratio", id: `eq.${id}`, limit: "1" },
     });
     if (!run) return Response.json({ error: "Run not found." }, { status: 404 });
 
@@ -93,25 +107,30 @@ export async function POST(request: Request) {
           !cleanElapsed(sample.elapsedMs) ||
           !finite(sample.scale) || sample.scale <= 0 || sample.scale > 1 ||
           !(sample.rawTtc === null || (finite(sample.rawTtc) && sample.rawTtc >= 0 && sample.rawTtc <= 30)) ||
-          !finite(sample.quality) || sample.quality < 0 || sample.quality > 1
+          !finite(sample.quality) || sample.quality < 0 || sample.quality > 1 ||
+          !(sample.clientSampleId === undefined || cleanId(sample.clientSampleId))
         ) return bad("Invalid measurement.");
         samples.push({
           elapsedMs: sample.elapsedMs,
           scale: sample.scale,
           rawTtc: sample.rawTtc,
           quality: sample.quality,
+          ...(sample.clientSampleId === undefined ? {} : { clientSampleId: sample.clientSampleId }),
         });
       }
 
       if (samples.length) {
         await databaseRequest<null>("camera_samples", {
           method: "POST",
+          query: { on_conflict: "run_id,client_sample_id" },
+          ignoreDuplicates: true,
           body: samples.map((sample) => ({
             run_id: id,
             elapsed_ms: sample.elapsedMs,
             scale: sample.scale,
             raw_ttc: sample.rawTtc,
             quality: sample.quality,
+            client_sample_id: sample.clientSampleId ?? null,
           })),
         });
       }
@@ -130,24 +149,16 @@ export async function POST(request: Request) {
     }
 
     if (data.action === "finish") {
-      if (run.status !== "active" || !cleanElapsed(data.referenceElapsedMs)) {
+      if (!cleanElapsed(data.referenceElapsedMs)) {
         return bad("Invalid reference point.");
       }
-      const rows = await databaseRequest<SavedSample[]>("camera_samples", {
-        method: "GET",
-        query: {
-          select: "elapsed_ms,raw_ttc,quality",
-          run_id: `eq.${id}`,
-          order: "elapsed_ms.desc",
-          limit: "50",
-        },
-      });
-      const samples = rows.map((row) => ({
-        elapsedMs: row.elapsed_ms,
-        rawTtc: row.raw_ttc,
-        quality: row.quality,
-      }));
-      const ratio = trialCalibration(samples, data.referenceElapsedMs);
+      const alreadyFinished = (run.status === "completed" || run.status === "verified") && run.reference_elapsed_ms === data.referenceElapsedMs;
+      if (run.status !== "active" && !alreadyFinished) return bad("This run has ended or uses a different reference point.");
+      const analysis = await runAnalysis(id, data.referenceElapsedMs);
+      if (alreadyFinished) {
+        return Response.json({ learned: run.calibration_ratio !== null, analysis, ...(await optionalCalibration()) });
+      }
+      const ratio = analysis.ratio;
       await databaseRequest<null>("camera_runs", {
         method: "PATCH",
         query: { id: `eq.${id}`, status: "eq.active" },
@@ -157,11 +168,11 @@ export async function POST(request: Request) {
           calibration_ratio: ratio,
         },
       });
-      return Response.json({ learned: ratio !== null, ...(await calibration()) });
+      return Response.json({ learned: ratio !== null, analysis, ...(await optionalCalibration()) });
     }
 
     return bad("Unknown action.");
-  } catch {
-    return Response.json({ error: "Could not save the measurement." }, { status: 500 });
+  } catch (error) {
+    return databaseFailure(error);
   }
 }
