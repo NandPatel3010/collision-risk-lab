@@ -1,15 +1,19 @@
 "use client";
 
-import { useEffect, useRef, useState, type MouseEvent } from "react";
+import { useEffect, useEffectEvent, useRef, useState, type MouseEvent } from "react";
 import { YOLO, type Results } from "@ultralytics/yolo";
 import { emptyEstimate, estimateApproach, type ApproachEstimate, type ScaleSample } from "@/lib/approach";
 import { predictObjectContact, updateObjectTracks, type ObjectTrack, type PairPrediction } from "@/lib/trajectory";
+import Link from "next/link";
+import { SampleBuffer } from "@/lib/sample-buffer";
+import { rememberTrial } from "@/lib/trial-history";
+import type { CalibrationAnalysis } from "@/lib/calibration";
 
 type Box = { x: number; y: number; width: number; height: number };
 type SeenObject = { box: Box; label: string; score: number; trackId: number };
-type StoredSample = { elapsedMs: number; scale: number; rawTtc: number | null; quality: number };
-type ActiveRun = { id: string; startAt: number };
-type CameraResponse = { id: string; factor: number; verifiedRuns: number; learned: boolean; error?: string };
+type ActiveRun = { id: string; startAt: number; buffer: SampleBuffer };
+type PendingTrial = { run: ActiveRun; referenceElapsedMs?: number };
+type CameraResponse = { id: string; factor?: number; verifiedRuns?: number; learned?: boolean; analysis?: CalibrationAnalysis; calibrationAvailable?: boolean; error?: string };
 
 function centerDistance(a: Box, b: Box, width: number, height: number) {
   const dx = (a.x + a.width / 2 - b.x - b.width / 2) / width;
@@ -66,8 +70,8 @@ export default function CameraLab() {
   const smoothSecondsRef = useRef<number | null>(null);
   const samplesRef = useRef<ScaleSample[]>([]);
   const runRef = useRef<ActiveRun | null>(null);
-  const pendingSamplesRef = useRef<StoredSample[]>([]);
-  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingTrialsRef = useRef(new Map<string, PendingTrial>());
+  const finishingRef = useRef(false);
   const runTokenRef = useRef(0);
   const lastSaveRef = useRef(0);
 
@@ -85,9 +89,18 @@ export default function CameraLab() {
   const [saveStatus, setSaveStatus] = useState("Measurements are saved when an object is tracked.");
   const [savingReference, setSavingReference] = useState(false);
   const [hasActiveRun, setHasActiveRun] = useState(false);
+  const [retryAvailable, setRetryAvailable] = useState(false);
+  const [sampleCounts, setSampleCounts] = useState({ saved: 0, pending: 0 });
+  const [lastRunId, setLastRunId] = useState<string | null>(null);
+
+  const applyCalibration = (data: CameraResponse) => {
+    if (typeof data.factor === "number" && typeof data.verifiedRuns === "number") {
+      setCalibration({ factor: data.factor, verifiedRuns: data.verifiedRuns });
+    }
+  };
 
   const postMeasurement = async (body: Record<string, unknown>) => {
-    const response = await fetch("/api/camera", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const response = await fetch("/api/camera", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body), signal: AbortSignal.timeout(65_000) });
     const result = await response.json() as CameraResponse;
     if (!response.ok) throw new Error(result.error || "Could not save measurements.");
     return result;
@@ -95,19 +108,38 @@ export default function CameraLab() {
 
   useEffect(() => {
     fetch("/api/camera").then((response) => response.json() as Promise<CameraResponse>).then((data) => {
-      if (typeof data.factor === "number") setCalibration({ factor: data.factor, verifiedRuns: data.verifiedRuns });
-      else setSaveStatus("Measurement storage is unavailable. Live estimates still work.");
+      if (typeof data.factor === "number") applyCalibration(data);
+      else setSaveStatus(data.error ?? "Measurement storage is unavailable. Live estimates still work.");
     }).catch(() => setSaveStatus("Measurement storage is unavailable. Live estimates still work."));
   }, []);
 
-  const flushSamples = (run: ActiveRun) => {
-    const batch = pendingSamplesRef.current.splice(0);
-    if (!batch.length) return saveQueueRef.current;
-    saveQueueRef.current = saveQueueRef.current.catch(() => {}).then(async () => {
-      await postMeasurement({ action: "samples", id: run.id, samples: batch });
-      setSaveStatus("Measurements saved live · video stays on this device.");
-    }).catch(() => { setSaveStatus("Some measurements could not be saved. Check your connection."); });
-    return saveQueueRef.current;
+  const flushSamples = async (run: ActiveRun) => {
+    try {
+      await run.buffer.flush(async (samples) => { await postMeasurement({ action: "samples", id: run.id, samples }); });
+      if (runRef.current === run) {
+        setSampleCounts({ saved: run.buffer.savedCount, pending: run.buffer.pendingCount });
+        setSaveStatus("Measurements saved live · video stays on this device.");
+        setRetryAvailable(pendingTrialsRef.current.size > 0);
+      }
+    } catch (cause) {
+      setRetryAvailable(true);
+      setSaveStatus(`${cause instanceof Error ? cause.message : "Upload failed."} Unsaved samples are retained in this tab. Keep it open and retry.`);
+      throw cause;
+    }
+  };
+
+  const saveTrial = async (trial: PendingTrial) => {
+    await flushSamples(trial.run);
+    const result = await postMeasurement(trial.referenceElapsedMs === undefined
+      ? { action: "stop", id: trial.run.id }
+      : { action: "finish", id: trial.run.id, referenceElapsedMs: trial.referenceElapsedMs });
+    pendingTrialsRef.current.delete(trial.run.id);
+    applyCalibration(result);
+    setRetryAvailable(pendingTrialsRef.current.size > 0);
+    if (runRef.current && runRef.current !== trial.run) return;
+    setSampleCounts({ saved: trial.run.buffer.savedCount, pending: trial.run.buffer.pendingCount });
+    setSaveStatus(trial.referenceElapsedMs === undefined ? "Trial stopped and measurements saved."
+      : `${result.analysis?.message ?? "Reference trial saved."}${result.calibrationAvailable === false ? " Shared calibration could not be refreshed; your trial is saved." : ""}`);
   };
 
   const endRun = async () => {
@@ -116,10 +148,14 @@ export default function CameraLab() {
     runRef.current = null;
     setHasActiveRun(false);
     if (!run) return;
+    const trial = { run };
+    pendingTrialsRef.current.set(run.id, trial);
     try {
-      await flushSamples(run);
-      await postMeasurement({ action: "stop", id: run.id });
-    } catch { setSaveStatus("Some measurements could not be saved. Check your connection."); }
+      await saveTrial(trial);
+    } catch (cause) {
+      setRetryAvailable(true);
+      setSaveStatus(`${cause instanceof Error ? cause.message : "Could not stop trial."} Trial remains pending in this tab; retry saving before leaving.`);
+    }
   };
 
   const release = () => {
@@ -143,7 +179,16 @@ export default function CameraLab() {
     smoothSecondsRef.current = null;
   };
 
-  useEffect(() => () => release(), []);
+  const releaseOnUnmount = useEffectEvent(() => release());
+  useEffect(() => () => releaseOnUnmount(), []);
+
+  useEffect(() => {
+    const warnIfUnsaved = (event: BeforeUnloadEvent) => {
+      if (runRef.current?.buffer.pendingCount || pendingTrialsRef.current.size) event.preventDefault();
+    };
+    window.addEventListener("beforeunload", warnIfUnsaved);
+    return () => window.removeEventListener("beforeunload", warnIfUnsaved);
+  }, []);
 
   useEffect(() => {
     if (status !== "live") return;
@@ -166,18 +211,27 @@ export default function CameraLab() {
   };
 
   const selectObject = (object: SeenObject, index: number) => {
+    if (finishingRef.current || pendingTrialsRef.current.size) {
+      setHint("Finish saving the previous trial before selecting another object. Use Retry saving if needed.");
+      return;
+    }
     void endRun();
     const token = runTokenRef.current;
     const startAt = performance.now();
-    pendingSamplesRef.current = [];
+    setSampleCounts({ saved: 0, pending: 0 });
     setSaveStatus("Starting a saved test run…");
     postMeasurement({ action: "start", label: object.label }).then((data) => {
       if (token !== runTokenRef.current) { void postMeasurement({ action: "stop", id: data.id }).catch(() => {}); return; }
-      runRef.current = { id: data.id, startAt };
+      runRef.current = { id: data.id, startAt, buffer: new SampleBuffer() };
+      setLastRunId(data.id);
+      const remembered = rememberTrial({ id: data.id, label: object.label, createdAt: new Date().toISOString() });
       setHasActiveRun(true);
-      setCalibration({ factor: data.factor, verifiedRuns: data.verifiedRuns });
-      setSaveStatus("Recording measurements live · video stays on this device.");
-    }).catch(() => setSaveStatus("Measurement storage is unavailable. Live estimates still work."));
+      applyCalibration(data);
+      setSaveStatus(remembered ? "Recording measurements live · video stays on this device."
+        : "Recording is active, but browser history storage is unavailable. Keep the trial results link.");
+    }).catch((cause) => {
+      if (token === runTokenRef.current) setSaveStatus(`${cause instanceof Error ? cause.message : "Measurement storage is unavailable."} Live estimates still work. Select the object again to retry recording.`);
+    });
     targetRef.current = object;
     candidateRef.current = null;
     missedRef.current = 0;
@@ -190,12 +244,11 @@ export default function CameraLab() {
     setHint("Tracking started. Move the object toward a stationary camera to estimate contact time.");
   };
 
-  const processFrame = async (detector: YOLO, session: number) => {
+  const processFrame = async (detector: YOLO, session: number, now: number) => {
     if (session !== sessionRef.current) return;
     const video = videoRef.current;
-    const now = performance.now();
     if (!video || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA || now - lastInferenceRef.current < 180) {
-      frameRef.current = requestAnimationFrame(() => { void processFrame(detector, session); });
+      frameRef.current = requestAnimationFrame((timestamp) => { void processFrame(detector, session, timestamp); });
       return;
     }
     lastInferenceRef.current = now;
@@ -210,7 +263,7 @@ export default function CameraLab() {
           label: item.name || "Object", score: item.conf,
         }));
       setVideoSize((size) => size.width === width && size.height === height ? size : { width, height });
-      const time = performance.now() / 1000;
+      const time = now / 1000;
       const tracked = updateObjectTracks(tracksRef.current, detections.map(({ box, label, score }) => ({ box, label, confidence: score })), time, width, height, nextTrackIdRef.current);
       tracksRef.current = tracked.tracks;
       nextTrackIdRef.current = tracked.nextId;
@@ -265,7 +318,6 @@ export default function CameraLab() {
             const scale = Math.sqrt(box.width * box.height / (width * height));
             const smoothScale = smoothScaleRef.current === null ? scale : smoothScaleRef.current * 0.45 + scale * 0.55;
             smoothScaleRef.current = smoothScale;
-            const time = performance.now() / 1000;
             samplesRef.current = [...samplesRef.current, { time, scale: smoothScale }].filter((sample) => time - sample.time <= 4);
             const raw = estimateApproach(samplesRef.current);
             const seconds = raw.seconds === null ? null : smoothSecondsRef.current === null ? raw.seconds : smoothSecondsRef.current * 0.55 + raw.seconds * 0.45;
@@ -273,10 +325,11 @@ export default function CameraLab() {
             setEstimate({ ...raw, seconds });
             const run = runRef.current;
             if (run) {
-              pendingSamplesRef.current.push({ elapsedMs: Math.round(performance.now() - run.startAt), scale: smoothScale, rawTtc: raw.seconds, quality: raw.quality });
-              if (performance.now() - lastSaveRef.current >= 1000 || pendingSamplesRef.current.length >= 24) {
-                lastSaveRef.current = performance.now();
-                void flushSamples(run);
+              run.buffer.add({ clientSampleId: crypto.randomUUID(), elapsedMs: Math.max(0, Math.round(now - run.startAt)), scale: smoothScale, rawTtc: raw.seconds, quality: raw.quality });
+              setSampleCounts({ saved: run.buffer.savedCount, pending: run.buffer.pendingCount });
+              if (now - lastSaveRef.current >= 1000) {
+                lastSaveRef.current = now;
+                void flushSamples(run).catch(() => {});
               }
             }
             setHint(raw.seconds !== null ? "Approaching · estimate updates as the object moves." : raw.trend === "receding" ? "Moving away · no collision time to show." : raw.trend === "steady" ? "No clear approach · sideways or still motion has no contact-time estimate." : "Measuring approach · keep the object visible and move steadily toward the camera.");
@@ -301,7 +354,7 @@ export default function CameraLab() {
             setHint("Object lost. Keep it in view or select another outline.");
           } else setHint("Briefly lost the object · trying to reacquire it.");
         }
-      } else if (visible.length && now >= autoSelectAfterRef.current) {
+      } else if (visible.length && now >= autoSelectAfterRef.current && !finishingRef.current && !pendingTrialsRef.current.size) {
         const best = visible.map((object, index) => ({ object, index, priority: object.score - centerDistance(object.box, { x: width * 0.25, y: height * 0.25, width: width * 0.5, height: height * 0.5 }, width, height) * 0.15 }))
           .sort((a, b) => b.priority - a.priority)[0];
         const candidate = candidateRef.current;
@@ -317,7 +370,7 @@ export default function CameraLab() {
     } catch (cause) {
       if (session === sessionRef.current) setHint(`Detection paused: ${cause instanceof Error ? cause.message : "try restarting the camera"}`);
     }
-    if (session === sessionRef.current) frameRef.current = requestAnimationFrame(() => { void processFrame(detector, session); });
+    if (session === sessionRef.current) frameRef.current = requestAnimationFrame((timestamp) => { void processFrame(detector, session, timestamp); });
   };
 
   const startCamera = async () => {
@@ -350,7 +403,7 @@ export default function CameraLab() {
       setStatus("live");
       setHint("Looking for an object to track automatically…");
       lastInferenceRef.current = 0;
-      void processFrame(detector, session);
+      void processFrame(detector, session, performance.now());
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : "Camera could not start.";
       release();
@@ -361,19 +414,22 @@ export default function CameraLab() {
 
   const markReference = async () => {
     const run = runRef.current;
-    if (!run || savingReference) return;
+    if (!run || finishingRef.current) return;
+    finishingRef.current = true;
     const referenceElapsedMs = Math.round(performance.now() - run.startAt);
     runRef.current = null;
     setHasActiveRun(false);
     runTokenRef.current += 1;
     autoSelectAfterRef.current = performance.now() + 1600;
     setSavingReference(true);
+    const trial = { run, referenceElapsedMs };
+    pendingTrialsRef.current.set(run.id, trial);
     try {
-      await flushSamples(run);
-      const result = await postMeasurement({ action: "finish", id: run.id, referenceElapsedMs });
-      setCalibration({ factor: result.factor, verifiedRuns: result.verifiedRuns });
-      setSaveStatus(result.learned ? "Trial saved. Future estimates now use updated calibration." : "Trial saved, but it needs more reliable predictions to update calibration.");
-    } catch { setSaveStatus("Could not finish this trial. Check your connection."); }
+      await saveTrial(trial);
+    } catch (cause) {
+      setRetryAvailable(true);
+      setSaveStatus(`${cause instanceof Error ? cause.message : "Could not finish trial."} Your original reference time and pending samples are retained. Keep this tab open and retry saving.`);
+    }
     targetRef.current = null;
     samplesRef.current = [];
     smoothScaleRef.current = null;
@@ -383,6 +439,21 @@ export default function CameraLab() {
     setEstimate(emptyEstimate);
     setHint("Move the object away, then approach again for another test.");
     setSavingReference(false);
+    finishingRef.current = false;
+  };
+
+  const retrySaving = async () => {
+    if (finishingRef.current) return;
+    finishingRef.current = true;
+    setSavingReference(true);
+    try {
+      for (const trial of [...pendingTrialsRef.current.values()]) await saveTrial(trial);
+      if (runRef.current) await flushSamples(runRef.current);
+      setRetryAvailable(false);
+    } catch (cause) {
+      setRetryAvailable(true);
+      setSaveStatus(`${cause instanceof Error ? cause.message : "Save failed."} Measurements remain pending in this tab.`);
+    } finally { finishingRef.current = false; setSavingReference(false); }
   };
 
   const chooseAtPoint = (event: MouseEvent<HTMLDivElement>) => {
@@ -401,7 +472,7 @@ export default function CameraLab() {
   const risk = displayedPairSeconds !== null && displayedPairSeconds < 3;
   const cameraOn = status === "live" || status === "loading";
   return <main className="camera-app">
-    <header className="app-header"><div><strong>Collision Risk Lab</strong><span>Live camera-view motion estimates</span></div><span className={"camera-status " + (status === "live" ? "online" : "")}>{status === "live" ? "Camera on" : status === "loading" ? "Starting camera" : "Camera off"}</span></header>
+    <header className="app-header"><div><strong>Collision Risk Lab</strong><span>Live camera-view motion estimates</span></div><div><Link href="/history" target="_blank" rel="noopener noreferrer">Trial history</Link><span className={"camera-status " + (status === "live" ? "online" : "")}>{status === "live" ? "Camera on" : status === "loading" ? "Starting camera" : "Camera off"}</span></div></header>
     <div className="app-content">
       <section className="camera-area" aria-label="Webcam approach detection">
         <div className="section-top"><div><h1>Camera</h1><p>Keep the laptop still. Move one visible object toward another, or toward the lens.</p></div><button type="button" className={cameraOn ? "control-button secondary" : "control-button primary"} onClick={cameraOn ? stopCamera : startCamera}>{cameraOn ? "Stop camera" : "Start camera"}</button></div>
@@ -420,7 +491,7 @@ export default function CameraLab() {
         <div className="main-reading"><div className="reading-label">OBJECT-TO-OBJECT · CAMERA VIEW</div><div className={"reading-value " + (risk ? "risk" : "")} aria-live="polite">{displayedPairSeconds === null ? "—" : displayedPairSeconds.toFixed(1)}{displayedPairSeconds !== null && <span> s</span>}</div><p>{pairEstimate ? displayedPairSeconds !== null && displayedPairSeconds < 0.15 ? `Projected overlap now · ${pairEstimate.moving} and ${pairEstimate.stationary}` : `${pairEstimate.moving} on a path toward stationary ${pairEstimate.stationary} · ${Math.round(pairEstimate.quality * 100)}% path fit` : status !== "live" ? "Start the camera to measure a shared path" : objects.length < 2 ? "Looking for two steady, recognizable objects" : "Move one object steadily toward a stationary object"}</p></div>
         <div className="secondary-reading"><div className="reading-label">TOWARD CAMERA · LENS APPROACH</div><div className="secondary-value">{adjustedSeconds === null ? "—" : `${adjustedSeconds.toFixed(1)} s`}</div><p>{adjustedSeconds !== null ? "Estimated from apparent growth" : targetName === "No object tracked" ? "Waiting for a tracked object" : estimate.trend === "steady" ? "No clear approach toward camera" : estimate.trend === "receding" ? "Object moving away" : "Measuring movement"}</p></div>
         <dl className="tracking-details"><div><dt>Tracking</dt><dd>{targetName}</dd></div><div><dt>Motion</dt><dd className="capitalized">{estimate.trend}</dd></div><div><dt>Apparent growth</dt><dd>{estimate.growthPercent ? `${estimate.growthPercent > 0 ? "+" : ""}${estimate.growthPercent.toFixed(1)}%` : "—"}</dd></div><div><dt>Signal quality</dt><dd>{estimate.quality ? `${Math.round(estimate.quality * 100)}%` : "—"}</dd></div></dl>
-        <div className="run-controls"><button type="button" className="control-button primary" onClick={markReference} disabled={!hasActiveRun || savingReference}>{savingReference ? "Saving reference…" : "Mark reference reached"}</button><p>To add a reference measurement, stop at the chosen safe point and mark it here.</p><p className="storage-status" role="status">{saveStatus}</p></div>
+        <div className="run-controls"><button type="button" className="control-button primary" onClick={markReference} disabled={!hasActiveRun || savingReference}>{savingReference ? "Saving trial…" : "Mark reference reached"}</button><p>To add a reference measurement, stop at the chosen safe point and mark it here.</p><p>{sampleCounts.saved} samples acknowledged · {sampleCounts.pending} pending upload</p><p className="storage-status" role="status">{saveStatus}</p>{retryAvailable && <button type="button" className="control-button secondary" disabled={savingReference} onClick={() => void retrySaving()}>Retry saving</button>}{lastRunId && <p><Link href={`/history?trial=${lastRunId}`} target="_blank" rel="noopener noreferrer">View saved trial results</Link></p>}</div>
         <p className="privacy-note">Object-to-object time predicts overlap in the 2D image, not a confirmed physical collision; the objects may be at different depths. It assumes steady motion. Video is processed on this device. Only lens-approach numeric measurements and the selected label are saved for calibration. This is not a safety device.</p>
       </aside>
     </div>

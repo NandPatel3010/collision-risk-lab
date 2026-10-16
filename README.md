@@ -50,6 +50,81 @@ When a reference is marked, the server compares the reference time with eligible
 - Supabase Postgres for measurement and calibration records.
 - Vercel for the live web deployment.
 
+## Trial history and save diagnostics
+
+The camera now shows acknowledged and pending sample counts. If an upload fails,
+its samples remain in a per-run browser-memory queue, with their original IDs.
+Use **Retry saving** and keep the recording tab open. The queue does not survive
+closing or reloading the tab. A failed flush prevents the client from finishing
+the trial, and a retried finish keeps the original reference timestamp.
+
+**Trial history** opens in another tab so recording is not interrupted. It remembers
+up to 100 trial links in this browser, not a public directory of every user's
+trials. An existing trial can also be opened by its UUID. Older trials are not
+automatically added to browser history; paste their ID from the database.
+Treat a trial URL as a shareable link: this demo's detail endpoint uses the ID,
+not a user login, to select a record. It does not add account-level ownership.
+
+The detail page shows saved samples, raw lens predictions, a reference-time line,
+mean absolute error against the user-marked reference, calibration eligibility,
+and CSV export. Missing predictions stay missing; they are not converted to zero.
+Error is evaluated on finite, nonnegative raw predictions strictly before the
+reference. It is not physical-collision accuracy and does not measure whether the
+shared display multiplier improved a particular historical trial. The calibration
+report examines the latest 50 saved samples, matching the finish endpoint. It
+counts each sample's first rejection reason, so rejection categories do not overlap.
+
+Samples load in pages of 500. The graph, metrics, and export describe the loaded
+samples; **Load earlier samples** expands that set. A partial CSV is named with
+`-partial`. Refresh an active trial after it stops before comparing complete runs.
+
+### Supabase setup
+
+1. Configure server-only `SUPABASE_URL` and `SUPABASE_SECRET_KEY`, as shown in
+   `.env.example`. Never use a public/browser environment variable for the secret.
+2. Apply `supabase/migrations/20260927000000_camera_measurements.sql` if the camera
+   tables do not exist yet.
+3. Apply `supabase/migrations/20261016000000_sample_retry_keys.sql` **before deploying
+   this client/API version**. It adds a nullable client sample UUID and a unique
+   index; existing samples remain intact. New uploads use duplicate-safe inserts,
+   so retrying after a lost response does not create another copy of a sample.
+4. Start the application and confirm that sample counts increase, then finish a
+   reference trial and inspect its history page.
+
+The current camera backend uses Supabase directly. `npm run db:generate` produces
+SQLite/D1 migrations from `db/schema.ts`; it does **not** apply either Supabase file.
+
+### Read-only trial endpoint
+
+`GET /api/trials/<uuid>?offset=0&limit=500` returns the run, a sample page ordered
+newest first, `hasMore`, and `nextOffset`. Limits of 1-500 and offsets of 0-100000
+are accepted. There is no anonymous endpoint listing all runs.
+
+### Checks
+
+```sh
+npm ci
+npm test
+npm run lint
+npm run build
+```
+
+`npm test` uses Node's built-in test runner and the existing TypeScript compiler.
+It covers calibration decisions, reference error calculations, missing values,
+batch retention, concurrent flushes, duplicate-safe retries, finish retries,
+history pagination, request validation, and safe database errors. Database HTTP
+calls are simulated; these tests do not certify a live Supabase deployment or
+camera accuracy. Expected failure scenarios print safe database error metadata.
+
+For a restricted Windows environment where native config resolution or Turbopack
+fails with a path permission error, the equivalent build can be checked with:
+
+```sh
+npx next build --webpack --experimental-next-config-strip-types
+```
+
+This is a local tooling workaround, not a requirement for Vercel deployments.
+
 ## Limitations and safety
 
 These values are visual estimates, not measured physical distances or guaranteed collision warnings. The lens estimate assumes a stationary camera and an object whose apparent size changes mainly because it moves closer. Changes in pose, rotation, occlusion, lighting, or detection quality can distort that signal. The object-to-object estimate uses 2D image overlap and assumes recent motion continues steadily. Neither estimate accounts for full 3D motion or object intent.
